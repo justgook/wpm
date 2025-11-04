@@ -14,14 +14,14 @@ func main() {
 	manager := Must(sdk.New(ctx, sdk.Config{
 		EnableWASI: true,
 	}, []sdk.Module{
-		{Name: "random", WasmData: Must(os.ReadFile("build.nosync/random.wasm"))},
-		{Name: "greet", WasmData: Must(os.ReadFile("build.nosync/greet.wasm"))},
+		{Name: "random", WasmData: Must(os.ReadFile("random.wasm"))},
+		{Name: "greet", WasmData: Must(os.ReadFile("greet.wasm"))},
 	}, []sdk.HostFunction{}))
 	defer manager.Close()
 
-	returnValue, result := Must2(manager.Call("greet", "greet", []byte("Kazys")))
-	fmt.Printf("Plugin return value: %d\n", returnValue)
-	fmt.Printf("Plugin output: %s\n", string(result))
+	// Test greet function
+	returnValue, result := Must2(manager.Call("greet", "greet", []byte("World")))
+	fmt.Printf("Greet - return value: %d, output: %s\n", returnValue, string(result))
 }
 
 func Must0(err error) {

@@ -2,6 +2,6 @@ go 1.25.2
 
 use (
 	.
-	./pdk
-	./sdk
+	../pdk
+	../sdk
 )
