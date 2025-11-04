@@ -1,3 +1,3 @@
-module github.com/justgook/wasm-plugin/pdk
+module github.com/justgook/wpm/pdk
 
 go 1.25.2

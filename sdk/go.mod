@@ -1,4 +1,4 @@
-module github.com/justgook/wasm-plugin/sdk
+module github.com/justgook/wpm/sdk
 
 go 1.25.2
 

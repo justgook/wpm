@@ -3,7 +3,7 @@ package sdk
 import (
 	"context"
 
-	"github.com/justgook/wasm-plugin/sdk/internal"
+	"github.com/justgook/wpm/sdk/internal"
 )
 
 // PluginManager defines the contract for managing WASM plugins and host functions
