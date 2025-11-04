@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strconv"
 	"unsafe"
 )
 
@@ -31,8 +32,7 @@ func Greet() uint32 {
 	name := string(inData)
 
 	// Create greeting
-	greeting := "Hello " + name
-
+	greeting := "Hello " + name + strconv.FormatFloat(float64(nextRand()), 'f', -1, 64)
 	// Allocate space for output
 	outPtr := alloc(uint64(len(greeting)))
 	outBuf := (*[1 << 20]byte)(unsafe.Pointer(uintptr(outPtr)))[:len(greeting):len(greeting)]
