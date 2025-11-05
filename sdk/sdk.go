@@ -13,6 +13,7 @@ type PluginManager = internal.PluginManager
 type Config struct {
 	EnableWASI    bool
 	EnvModuleName string
+	MaxCallDepth  int // Maximum depth for nested plugin calls (default: 10)
 }
 
 // Module represents a WASM plugin module
@@ -28,6 +29,10 @@ type HostFunction struct {
 	Handler  any    // any function signature wazero supports
 }
 
+// ByteHandler is a special handler type for host functions that work with byte slices
+// This signature mirrors the plugin Call interface: (input []byte) -> (returnCode int32, output []byte)
+type ByteHandler func(input []byte) (int32, []byte)
+
 // New creates a plugin manager with WASM modules and host functions
 func New(ctx context.Context, config Config, wasmModules []Module, hostFunctions []HostFunction) (PluginManager, error) {
 	internalModules := make([]internal.Module, len(wasmModules))
@@ -40,16 +45,23 @@ func New(ctx context.Context, config Config, wasmModules []Module, hostFunctions
 
 	internalHostFunctions := make([]internal.HostFunction, len(hostFunctions))
 	for i, f := range hostFunctions {
+		// Convert ByteHandler to internal.ByteHandler if needed
+		var handler any = f.Handler
+		if bh, ok := f.Handler.(ByteHandler); ok {
+			handler = internal.ByteHandler(bh)
+		}
+
 		internalHostFunctions[i] = internal.HostFunction{
 			ModuleName:   f.Module,
 			FunctionName: f.Function,
-			Handler:      f.Handler,
+			Handler:      handler,
 		}
 	}
 
 	internalConfig := internal.Config{
 		EnableWASI:    config.EnableWASI,
 		EnvModuleName: config.EnvModuleName,
+		MaxCallDepth:  config.MaxCallDepth,
 	}
 
 	return internal.NewManager(ctx, internalConfig, internalModules, internalHostFunctions)

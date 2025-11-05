@@ -3,6 +3,7 @@ package internal
 import (
 	"context"
 	"fmt"
+	"io/fs"
 	"reflect"
 
 	"github.com/tetratelabs/wazero"
@@ -18,10 +19,19 @@ type PluginManager interface {
 	Close() error
 }
 
+type callContext struct {
+	moduleName string
+	inputPtr   uint32
+	inputLen   uint32
+	outputPtr  uint32
+	outputLen  uint32
+}
+
 type manager struct {
 	runtime          wazero.Runtime
 	wasmModules      map[string]api.Module
 	hostModules      map[string]api.Module
+	hostFunctionDefs map[string]map[string]HostFunction // moduleName -> functionName -> HostFunction
 	config           Config
 	envModuleName    string
 	memoryOffsets    map[string]uint32
@@ -29,11 +39,17 @@ type manager struct {
 	currentInputLen  uint32
 	currentOutputPtr uint32
 	currentOutputLen uint32
+	// Plugin-to-plugin call support
+	callStack         []*callContext
+	lastCallReturn    int32
+	lastCallOutputPtr uint32
+	lastCallOutputLen uint32
 }
 
 type Config struct {
 	EnableWASI    bool
 	EnvModuleName string
+	MaxCallDepth  int // Maximum depth for nested plugin calls (default: 10)
 }
 
 type Module struct {
@@ -47,6 +63,9 @@ type HostFunction struct {
 	Handler      any
 }
 
+// ByteHandler is a special handler type for host functions that work with byte slices
+type ByteHandler func(input []byte) (int32, []byte)
+
 func NewManager(ctx context.Context, config Config, wasmModules []Module, hostFunctions []HostFunction) (PluginManager, error) {
 	r := wazero.NewRuntime(ctx)
 
@@ -59,12 +78,13 @@ func NewManager(ctx context.Context, config Config, wasmModules []Module, hostFu
 		envName = "env"
 	}
 	mgr := &manager{
-		runtime:       r,
-		wasmModules:   make(map[string]api.Module),
-		hostModules:   make(map[string]api.Module),
-		config:        config,
-		envModuleName: envName,
-		memoryOffsets: make(map[string]uint32),
+		runtime:          r,
+		wasmModules:      make(map[string]api.Module),
+		hostModules:      make(map[string]api.Module),
+		hostFunctionDefs: make(map[string]map[string]HostFunction),
+		config:           config,
+		envModuleName:    envName,
+		memoryOffsets:    make(map[string]uint32),
 	}
 
 	// Setup host functions first
@@ -89,6 +109,12 @@ func (m *manager) setupHostFunctions(ctx context.Context, hostFunctions []HostFu
 	hostModules := make(map[string][]HostFunction)
 	for _, fn := range hostFunctions {
 		hostModules[fn.ModuleName] = append(hostModules[fn.ModuleName], fn)
+
+		// Store function definitions for direct invocation
+		if m.hostFunctionDefs[fn.ModuleName] == nil {
+			m.hostFunctionDefs[fn.ModuleName] = make(map[string]HostFunction)
+		}
+		m.hostFunctionDefs[fn.ModuleName][fn.FunctionName] = fn
 	}
 
 	// Add default env module if not provided
@@ -132,6 +158,23 @@ func (m *manager) createHostModule(ctx context.Context, moduleName string, funct
 		builder.NewFunctionBuilder().
 			WithGoModuleFunction(api.GoModuleFunc(m.setOutputFunc), []api.ValueType{api.ValueTypeI32, api.ValueTypeI32}, nil).
 			Export("set_output")
+		// Plugin-to-plugin call functions
+		builder.NewFunctionBuilder().
+			WithGoModuleFunction(api.GoModuleFunc(m.pluginCallFunc), []api.ValueType{
+				api.ValueTypeI32, api.ValueTypeI32, // module name ptr, len
+				api.ValueTypeI32, api.ValueTypeI32, // function name ptr, len
+				api.ValueTypeI32, api.ValueTypeI32, // input ptr, len
+			}, []api.ValueType{api.ValueTypeI32}). // status code
+			Export("plugin_call")
+		builder.NewFunctionBuilder().
+			WithGoModuleFunction(api.GoModuleFunc(m.pluginCallReturnFunc), nil, []api.ValueType{api.ValueTypeI32}).
+			Export("plugin_call_return")
+		builder.NewFunctionBuilder().
+			WithGoModuleFunction(api.GoModuleFunc(m.pluginCallOutputPtrFunc), nil, []api.ValueType{api.ValueTypeI32}).
+			Export("plugin_call_output_ptr")
+		builder.NewFunctionBuilder().
+			WithGoModuleFunction(api.GoModuleFunc(m.pluginCallOutputLenFunc), nil, []api.ValueType{api.ValueTypeI32}).
+			Export("plugin_call_output_len")
 	} else {
 		for _, fn := range functions {
 			if err := m.registerHostFunction(builder, fn); err != nil {
@@ -150,6 +193,72 @@ func (m *manager) createHostModule(ctx context.Context, moduleName string, funct
 }
 
 func (m *manager) registerHostFunction(builder wazero.HostModuleBuilder, fn HostFunction) error {
+	// Check if this is a ByteHandler (special case for byte-based functions)
+	if byteHandler, ok := fn.Handler.(ByteHandler); ok {
+		// ByteHandler functions work like plugin functions:
+		// - They read input via env.input_ptr/input_len
+		// - They write output via env.set_output
+		// - They return a status code (uint32)
+		builder.NewFunctionBuilder().
+			WithGoModuleFunction(api.GoModuleFunc(func(ctx context.Context, mod api.Module, stack []uint64) {
+				// This is a host function in a host module, but we need to access
+				// the calling WASM module's memory for input/output
+				// We use the manager's current input/output state
+				var input []byte
+				if m.currentInputLen > 0 {
+					// Find the calling module (last in call stack or use context)
+					callingMod := mod
+					if len(m.callStack) > 0 {
+						// Get the module from the call stack
+						lastCtx := m.callStack[len(m.callStack)-1]
+						if wasmMod, exists := m.wasmModules[lastCtx.moduleName]; exists {
+							callingMod = wasmMod
+						}
+					}
+
+					memory := callingMod.Memory()
+					if memory != nil {
+						inputBytes, ok := memory.Read(m.currentInputPtr, m.currentInputLen)
+						if ok {
+							input = inputBytes
+						}
+					}
+				}
+
+				// Call the handler
+				returnCode, output := byteHandler(input)
+
+				// Write output back to calling module's memory
+				if len(output) > 0 {
+					callingMod := mod
+					if len(m.callStack) > 0 {
+						lastCtx := m.callStack[len(m.callStack)-1]
+						if wasmMod, exists := m.wasmModules[lastCtx.moduleName]; exists {
+							callingMod = wasmMod
+						}
+					}
+
+					memory := callingMod.Memory()
+					if memory != nil {
+						outputPtr := m.allocate(callingMod, uint32(len(output)))
+						if memory.Write(outputPtr, output) {
+							m.currentOutputPtr = outputPtr
+							m.currentOutputLen = uint32(len(output))
+						}
+					}
+				} else {
+					m.currentOutputPtr = 0
+					m.currentOutputLen = 0
+				}
+
+				// Return the status code
+				stack[0] = uint64(uint32(returnCode))
+			}), nil, []api.ValueType{api.ValueTypeI32}).
+			Export(fn.FunctionName)
+
+		return nil
+	}
+
 	// Use reflection to determine function signature and register appropriately
 	handlerValue := reflect.ValueOf(fn.Handler)
 	handlerType := handlerValue.Type()
@@ -201,12 +310,34 @@ func (m *manager) registerHostFunction(builder wazero.HostModuleBuilder, fn Host
 
 func (m *manager) loadWasmModule(ctx context.Context, module Module) error {
 	config := wazero.NewModuleConfig().WithName(module.Name)
+
+	// If WASI is enabled, configure it with an empty filesystem
+	// This prevents nil pointer errors when Go's runtime tries to access filesystem
+	if m.config.EnableWASI {
+		config = config.WithFS(emptyFS{})
+	}
+
 	mod, err := m.runtime.InstantiateWithConfig(ctx, module.WasmData, config)
 	if err != nil {
 		return fmt.Errorf("failed to instantiate module %s: %w", module.Name, err)
 	}
+
+	// Call _initialize if it exists (required for TinyGo modules)
+	if initFn := mod.ExportedFunction("_initialize"); initFn != nil {
+		if _, err := initFn.Call(ctx); err != nil {
+			return fmt.Errorf("failed to initialize module %s: %w", module.Name, err)
+		}
+	}
+
 	m.wasmModules[module.Name] = mod
 	return nil
+}
+
+// emptyFS is a minimal fs.FS implementation that returns "file not found" for everything
+type emptyFS struct{}
+
+func (emptyFS) Open(name string) (fs.File, error) {
+	return nil, fs.ErrNotExist
 }
 
 func (m *manager) Call(moduleName, functionName string, input []byte) (int32, []byte, error) {
@@ -251,6 +382,9 @@ func (m *manager) callWasmFunction(ctx context.Context, mod api.Module, function
 		return 0, nil, fmt.Errorf("failed to call function %s: %w", functionName, err)
 	}
 
+	// Handle both functions with and without return values
+	// Functions using //go:wasmexport typically have no return value
+	// Functions using //export may return a value
 	returnValue := int32(0)
 	if len(results) > 0 {
 		returnValue = int32(results[0])
@@ -268,19 +402,30 @@ func (m *manager) callWasmFunction(ctx context.Context, mod api.Module, function
 }
 
 func (m *manager) callHostFunction(ctx context.Context, mod api.Module, functionName string, input []byte) (int32, []byte, error) {
-	fn := mod.ExportedFunction(functionName)
-	if fn == nil {
-		return 0, nil, fmt.Errorf("function %s not found in module", functionName)
+	// Get the host function definition
+	moduleName := mod.Name()
+	moduleFuncs, exists := m.hostFunctionDefs[moduleName]
+	if !exists {
+		return 0, nil, fmt.Errorf("host module %s not found", moduleName)
 	}
 
-	// TODO: Implement proper input/output handling for host functions
-	_, err := fn.Call(ctx)
-	if err != nil {
-		return 0, nil, fmt.Errorf("failed to call function %s: %w", functionName, err)
+	fn, exists := moduleFuncs[functionName]
+	if !exists {
+		return 0, nil, fmt.Errorf("function %s not found in host module %s", functionName, moduleName)
 	}
 
-	// TODO: Return actual output data
-	return 0, []byte{}, nil
+	// Check if this is a ByteHandler
+	if byteHandler, ok := fn.Handler.(ByteHandler); ok {
+		// Directly call the byte handler
+		returnCode, output := byteHandler(input)
+		return returnCode, output, nil
+	}
+
+	// For primitive type handlers, we need to use reflection
+	// This is more complex and requires converting input bytes to appropriate types
+	// For now, return an error for primitive handlers when called via manager.Call
+	// They should be called from plugins via direct WASM imports
+	return 0, nil, fmt.Errorf("primitive type host functions (like %s.%s) should be called from plugins via direct WASM imports, not via manager.Call", moduleName, functionName)
 }
 
 func (m *manager) Close() error {
@@ -381,4 +526,107 @@ func (m *manager) allocate(mod api.Module, size uint32) uint32 {
 	offset := m.memoryOffsets[name]
 	m.memoryOffsets[name] = offset + size
 	return offset
+}
+
+// Plugin-to-plugin call functions
+
+func (m *manager) pluginCallFunc(ctx context.Context, mod api.Module, stack []uint64) {
+	// 1. Read parameters from stack
+	modulePtr := uint32(stack[0])
+	moduleLen := uint32(stack[1])
+	funcPtr := uint32(stack[2])
+	funcLen := uint32(stack[3])
+	inputPtr := uint32(stack[4])
+	inputLen := uint32(stack[5])
+
+	// 2. Read strings from caller's memory
+	memory := mod.Memory()
+	moduleNameBytes, ok := memory.Read(modulePtr, moduleLen)
+	if !ok {
+		stack[0] = 1 // error: failed to read module name
+		return
+	}
+	funcNameBytes, ok := memory.Read(funcPtr, funcLen)
+	if !ok {
+		stack[0] = 2 // error: failed to read function name
+		return
+	}
+
+	moduleName := string(moduleNameBytes)
+	funcName := string(funcNameBytes)
+
+	// Read input (may be empty)
+	var inputBytes []byte
+	if inputLen > 0 {
+		inputBytes, ok = memory.Read(inputPtr, inputLen)
+		if !ok {
+			stack[0] = 3 // error: failed to read input
+			return
+		}
+	}
+
+	// 3. Check call depth
+	maxDepth := m.config.MaxCallDepth
+	if maxDepth == 0 {
+		maxDepth = 10 // default
+	}
+	if len(m.callStack) >= maxDepth {
+		stack[0] = 4 // error: max call depth exceeded
+		return
+	}
+
+	// 4. Save current context
+	currentCtx := &callContext{
+		moduleName: mod.Name(),
+		inputPtr:   m.currentInputPtr,
+		inputLen:   m.currentInputLen,
+		outputPtr:  m.currentOutputPtr,
+		outputLen:  m.currentOutputLen,
+	}
+	m.callStack = append(m.callStack, currentCtx)
+
+	// 5. Make the actual call
+	returnValue, output, err := m.CallWithContext(ctx, moduleName, funcName, inputBytes)
+
+	// 6. Restore context
+	m.callStack = m.callStack[:len(m.callStack)-1]
+	m.currentInputPtr = currentCtx.inputPtr
+	m.currentInputLen = currentCtx.inputLen
+	m.currentOutputPtr = currentCtx.outputPtr
+	m.currentOutputLen = currentCtx.outputLen
+
+	if err != nil {
+		stack[0] = 5 // error: call failed
+		return
+	}
+
+	// 7. Store call results in manager state for later retrieval
+	m.lastCallReturn = returnValue
+
+	// Allocate memory in caller's space for output
+	if len(output) > 0 {
+		m.lastCallOutputPtr = m.allocate(mod, uint32(len(output)))
+		m.lastCallOutputLen = uint32(len(output))
+		if !memory.Write(m.lastCallOutputPtr, output) {
+			stack[0] = 6 // error: failed to write output
+			return
+		}
+	} else {
+		m.lastCallOutputPtr = 0
+		m.lastCallOutputLen = 0
+	}
+
+	stack[0] = 0 // success
+}
+
+func (m *manager) pluginCallReturnFunc(ctx context.Context, mod api.Module, stack []uint64) {
+	stack[0] = uint64(uint32(m.lastCallReturn))
+}
+
+func (m *manager) pluginCallOutputPtrFunc(ctx context.Context, mod api.Module, stack []uint64) {
+	stack[0] = uint64(m.lastCallOutputPtr)
+}
+
+func (m *manager) pluginCallOutputLenFunc(ctx context.Context, mod api.Module, stack []uint64) {
+	stack[0] = uint64(m.lastCallOutputLen)
 }
