@@ -171,4 +171,87 @@ Current convention (`return != 0`) remains valid.
 - All offsets and lengths are expressed in **bytes** relative to the shared linear memory.
     
 - The ABI is designed to remain compatible with pure WASM runtimes like **wazero**.
+
+---
+
+## 💻 Language Support
+
+This ABI is language-agnostic and can be implemented in any language that compiles to WebAssembly.
+
+### Official PDK Implementations
+
+#### Go PDK (`pdk/pdk.go`)
+
+High-level Go library for building plugins with TinyGo:
+
+```go
+import "github.com/justgook/wpm/pdk"
+
+//export greet
+func Greet() uint32 {
+    input := pdk.Input()
+    name := string(input)
+    greeting := "Hello, " + name + "!"
+    pdk.Output([]byte(greeting))
+    return 0
+}
+```
+
+**Features:**
+- Automatic memory management
+- Idiomatic Go interfaces
+- Plugin-to-plugin calls via `pdk.Call()`
+- String/slice convenience wrappers
+
+**Build:** Requires [TinyGo](https://tinygo.org/)
+
+#### C PDK (`pdk/pdk.h`)
+
+Single-header library for building plugins in C:
+
+```c
+#include "pdk.h"
+
+__attribute__((export_name("greet")))
+uint32_t greet(void) {
+    uint32_t input_len;
+    const uint8_t *input = pdk_input(&input_len);
+    
+    // Process input...
+    
+    pdk_output(output, output_len);
+    return 0;
+}
+```
+
+**Features:**
+- Header-only (no separate compilation)
+- Zero libc dependencies
+- Custom `pdk_strlen()` and `pdk_memcpy()`
+- Both string and explicit-length API variants
+- Plugin-to-plugin calls via `pdk_call()` / `pdk_call_str()`
+
+**Build:** Requires [WASI SDK](https://github.com/WebAssembly/wasi-sdk) or clang with WebAssembly support
+
+### Language Comparison
+
+| Feature | Go (TinyGo) | C |
+|---------|-------------|---|
+| **Memory Safety** | ✅ Automatic GC | ⚠️ Manual management |
+| **String Handling** | ✅ Native strings | ⚠️ Manual byte arrays |
+| **Binary Size** | ~100-500KB | ~1-10KB |
+| **Performance** | ⚡⚡ Fast | ⚡⚡⚡ Fastest |
+| **Dev Experience** | ✅✅ Excellent | ⚠️ Manual |
+| **libc Required** | ❌ No | ❌ No (custom utils) |
+| **Build Complexity** | Low (TinyGo) | Low (WASI SDK) |
+
+### Examples
+
+See `example/plugins/` for working examples in multiple languages:
+- `logger/` - Go implementation
+- `logger_c/` - C implementation (functionally identical)
+- `greet/` - Go with plugin-to-plugin calls
+- `random/` - Zig implementation
+
+All plugins share the same ABI and can call each other regardless of implementation language.
     

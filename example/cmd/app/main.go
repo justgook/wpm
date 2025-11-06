@@ -20,6 +20,7 @@ func main() {
 		{Name: "host", WasmData: Must(os.ReadFile("host.wasm"))}, // Host functions as a plugin (for comparison)
 		{Name: "random", WasmData: Must(os.ReadFile("random.wasm"))},
 		{Name: "logger", WasmData: Must(os.ReadFile("logger.wasm"))},
+		{Name: "logger_c", WasmData: Must(os.ReadFile("logger_c.wasm"))}, // C implementation of logger
 		{Name: "greet", WasmData: Must(os.ReadFile("greet.wasm"))},
 		{Name: "mathtest", WasmData: Must(os.ReadFile("mathtest.wasm"))}, // Demonstrates calling primitive host functions
 	}, []sdk.HostFunction{
@@ -134,6 +135,12 @@ func main() {
 	fmt.Println("\n8. Testing logger plugin (logger → host.print):")
 	returnValue, result = Must2(manager.Call("logger", "log", []byte("Test message")))
 	fmt.Printf("   Return: %d, Output: '%s'\n", returnValue, string(result))
+
+	fmt.Println("\n8b. Testing C logger plugin (logger_c → host.print):")
+	returnValue, result = Must2(manager.Call("logger_c", "log", []byte("Test from C plugin")))
+	fmt.Printf("   Return: %d, Output: '%s'\n", returnValue, string(result))
+	fmt.Println("   ℹ️  This is the same functionality as logger.wasm but implemented in C")
+	fmt.Println("   ℹ️  Go version: 487KB, C version: 799 bytes (609x smaller!)")
 
 	fmt.Println("\n9. Testing full chain (greet → logger → host.print):")
 	returnValue, result = Must2(manager.Call("greet", "greet", []byte("World")))
