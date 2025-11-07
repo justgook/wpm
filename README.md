@@ -233,7 +233,87 @@ uint32_t greet(void) {
 
 **Build:** Requires [WASI SDK](https://github.com/WebAssembly/wasi-sdk) or clang with WebAssembly support
 
-### Language Comparison
+### Official SDK Implementations
+
+#### Go SDK (`sdk/sdk.go`)
+
+Server-side SDK for loading and managing WASM plugins in Go applications:
+
+```go
+import "github.com/justgook/wpm/sdk"
+
+manager, _ := sdk.New(ctx, sdk.Config{
+    EnableWASI: true,
+}, []sdk.Module{
+    {Name: "greet", WasmData: wasmBytes},
+}, []sdk.HostFunction{
+    {
+        Module: "host",
+        Function: "print",
+        Handler: sdk.ByteHandler(func(input []byte) (int32, []byte) {
+            fmt.Println(string(input))
+            return 0, []byte{}
+        }),
+    },
+})
+
+returnCode, output, _ := manager.Call("greet", "greet", []byte("World"))
+```
+
+**Features:**
+- Uses wazero runtime
+- Full WASI support
+- Plugin-to-plugin calls
+- Host function registration
+- Production-ready
+
+**Build:** Requires Go 1.21+
+
+#### JavaScript SDK (`sdk-js/wasm-plugin-sdk.js`)
+
+Browser SDK for loading and running WASM plugins in web applications:
+
+```javascript
+const manager = await PluginManager.create({
+  modules: [
+    { name: 'greet', url: '/plugins/greet.wasm' }
+  ],
+  hostFunctions: [
+    {
+      module: 'host',
+      function: 'print',
+      handler: (input) => {
+        console.log(new TextDecoder().decode(input));
+        return { returnCode: 0, output: new Uint8Array() };
+      }
+    }
+  ]
+});
+
+const result = await manager.call('greet', 'greet', 'World');
+```
+
+**Features:**
+- Zero dependencies
+- Single file (~450 lines)
+- Works with same WASM files as Go SDK
+- Full plugin-to-plugin call support
+- Native browser WebAssembly API
+
+**Build:** No build required, works in all modern browsers
+
+### SDK Comparison
+
+| Feature | Go SDK | JavaScript SDK |
+|---------|--------|----------------|
+| **Runtime** | wazero | WebAssembly API |
+| **Environment** | Server/CLI | Browser |
+| **Performance** | ⚡⚡⚡ Very Fast | ⚡⚡ Fast |
+| **WASI Support** | ✅ Full | ⚠️ Limited |
+| **Plugin Compatibility** | ✅ All | ✅ All |
+| **File Size** | Binary | ~450 lines JS |
+
+### Plugin Language Comparison
 
 | Feature | Go (TinyGo) | C |
 |---------|-------------|---|

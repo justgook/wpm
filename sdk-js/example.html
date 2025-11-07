@@ -1,0 +1,360 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>WASM Plugin SDK - Browser Demo</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 20px;
+      background: #f5f5f5;
+    }
+
+    h1 {
+      color: #333;
+    }
+
+    .container {
+      background: white;
+      padding: 20px;
+      border-radius: 8px;
+      box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+      margin-bottom: 20px;
+    }
+
+    button {
+      background: #007bff;
+      color: white;
+      border: none;
+      padding: 10px 20px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 14px;
+      margin-right: 10px;
+    }
+
+    button:hover {
+      background: #0056b3;
+    }
+
+    button:disabled {
+      background: #ccc;
+      cursor: not-allowed;
+    }
+
+    #output {
+      background: #1e1e1e;
+      color: #d4d4d4;
+      padding: 15px;
+      border-radius: 4px;
+      font-family: 'Courier New', monospace;
+      font-size: 13px;
+      line-height: 1.5;
+      white-space: pre-wrap;
+      max-height: 500px;
+      overflow-y: auto;
+    }
+
+    .info {
+      background: #e7f3ff;
+      border-left: 4px solid #007bff;
+      padding: 12px;
+      margin: 15px 0;
+    }
+
+    .warning {
+      background: #fff3cd;
+      border-left: 4px solid #ffc107;
+      padding: 12px;
+      margin: 15px 0;
+    }
+
+    input {
+      padding: 8px;
+      border: 1px solid #ddd;
+      border-radius: 4px;
+      margin-right: 10px;
+      font-size: 14px;
+    }
+  </style>
+</head>
+
+<body>
+  <h1>🧩 WASM Plugin SDK - Browser Demo</h1>
+
+  <div class="info">
+    <strong>ℹ️ Info:</strong> This demo shows how to use the JavaScript SDK to load and run WebAssembly plugins in the
+    browser.
+    The same WASM files work with both the Go SDK (server-side) and this JavaScript SDK (browser).
+  </div>
+
+  <div class="warning">
+    <strong>⚠️ Note:</strong> Make sure to serve this page from a web server (not file://) and that your WASM plugin
+    files are accessible.
+    You can use: <code>python3 -m http.server 8000</code> from the project root directory.
+  </div>
+
+  <div class="container">
+    <h2>Load Plugins</h2>
+    <p>Load WASM plugins from the server or upload them manually.</p>
+
+    <div style="margin-bottom: 15px;">
+      <input type="text" id="pluginUrl" placeholder="/path/to/plugin.wasm" style="width: 300px;">
+      <input type="text" id="pluginName" placeholder="Plugin name" style="width: 150px;">
+      <button onclick="loadFromUrl()">Load from URL</button>
+    </div>
+
+    <div>
+      <input type="file" id="pluginFile" accept=".wasm" multiple>
+      <button onclick="loadFromFile()">Load from File</button>
+    </div>
+
+    <div style="margin-top: 15px;">
+      <button onclick="loadDefaultPlugins()" id="loadDefaultBtn">Load Default Plugins</button>
+    </div>
+  </div>
+
+  <div class="container">
+    <h2>Call Plugin Functions</h2>
+    <p>Execute functions in loaded plugins.</p>
+
+    <div style="margin-bottom: 15px;">
+      <input type="text" id="callModule" placeholder="Module name" value="greet">
+      <input type="text" id="callFunction" placeholder="Function name" value="greet">
+      <input type="text" id="callInput" placeholder="Input" value="World">
+      <button onclick="callPlugin()" id="callBtn">Call Function</button>
+    </div>
+
+    <div>
+      <button onclick="runAllTests()" id="testBtn">Run All Tests</button>
+      <button onclick="clearOutput()">Clear Output</button>
+    </div>
+  </div>
+
+  <div class="container">
+    <h2>Output</h2>
+    <div id="output">Waiting for commands...</div>
+  </div>
+
+  <script src="wasm-plugin-sdk.js"></script>
+  <script>
+    let manager = null;
+    const output = document.getElementById('output');
+    const textDecoder = new TextDecoder();
+    const textEncoder = new TextEncoder();
+
+    function log(message, type = 'info') {
+      const timestamp = new Date().toLocaleTimeString();
+      const prefix = type === 'error' ? '❌ ' : type === 'success' ? '✅ ' : 'ℹ️  ';
+      output.textContent += `[${timestamp}] ${prefix}${message}\n`;
+      output.scrollTop = output.scrollHeight;
+    }
+
+    function clearOutput() {
+      output.textContent = '';
+    }
+
+    async function loadDefaultPlugins() {
+      try {
+        log('Loading default plugins...');
+        const loadDefaultBtn = document.getElementById('loadDefaultBtn');
+        loadDefaultBtn.disabled = true;
+
+        // Build paths relative to sdk-js directory
+        const basePath = './plugins';
+
+        manager = await PluginManager.create({
+          modules: [
+            {name: 'random', url: `${basePath}/random.wasm`},
+            {name: 'logger', url: `${basePath}/logger.wasm`},
+            {name: 'greet', url: `${basePath}/greet.wasm`},
+            {name: 'host', url: `${basePath}/host.wasm`}
+          ],
+          hostFunctions: [
+            {
+              module: 'native_host',
+              function: 'print',
+              handler: (input) => {
+                const text = textDecoder.decode(input);
+                log(`[NATIVE_HOST.PRINT] ${text}`, 'info');
+                return {returnCode: 0, output: new Uint8Array()};
+              }
+            },
+            {
+              module: 'native_host',
+              function: 'uppercase',
+              handler: (input) => {
+                const text = textDecoder.decode(input);
+                const upper = text.toUpperCase();
+                return {returnCode: 0, output: textEncoder.encode(upper)};
+              }
+            },
+            {
+              module: 'native_host',
+              function: 'timestamp',
+              handler: (input) => {
+                const timestamp = new Date().toISOString();
+                return {returnCode: 0, output: textEncoder.encode(timestamp)};
+              }
+            }
+          ],
+          config: {
+            maxCallDepth: 10
+          }
+        });
+
+        log('✅ Plugins loaded successfully!', 'success');
+        log(`   - logger.wasm`, 'info');
+        log(`   - greet.wasm`, 'info');
+        log(`   - host.wasm`, 'info');
+        log(`   - native_host (JavaScript functions)`, 'info');
+
+        loadDefaultBtn.disabled = false;
+      } catch (error) {
+        log(`Failed to load plugins: ${error.message}`, 'error');
+        console.error(error);
+        document.getElementById('loadDefaultBtn').disabled = false;
+      }
+    }
+
+    async function loadFromUrl() {
+      const url = document.getElementById('pluginUrl').value;
+      const name = document.getElementById('pluginName').value;
+
+      if (!url || !name) {
+        log('Please provide both URL and plugin name', 'error');
+        return;
+      }
+
+      try {
+        log(`Loading ${name} from ${url}...`);
+
+        if (!manager) {
+          manager = await PluginManager.create({modules: [], hostFunctions: []});
+        }
+
+        await manager.loadWasmModule({name, url});
+        log(`✅ ${name} loaded successfully!`, 'success');
+      } catch (error) {
+        log(`Failed to load ${name}: ${error.message}`, 'error');
+        console.error(error);
+      }
+    }
+
+    async function loadFromFile() {
+      const files = document.getElementById('pluginFile').files;
+
+      if (files.length === 0) {
+        log('Please select at least one WASM file', 'error');
+        return;
+      }
+
+      try {
+        if (!manager) {
+          manager = await PluginManager.create({modules: [], hostFunctions: []});
+        }
+
+        for (const file of files) {
+          log(`Loading ${file.name}...`);
+          const arrayBuffer = await file.arrayBuffer();
+          const name = file.name.replace('.wasm', '');
+
+          await manager.loadWasmModule({name, data: arrayBuffer});
+          log(`✅ ${name} loaded successfully!`, 'success');
+        }
+      } catch (error) {
+        log(`Failed to load file: ${error.message}`, 'error');
+        console.error(error);
+      }
+    }
+
+    async function callPlugin() {
+      if (!manager) {
+        log('Please load plugins first!', 'error');
+        return;
+      }
+
+      const moduleName = document.getElementById('callModule').value;
+      const functionName = document.getElementById('callFunction').value;
+      const input = document.getElementById('callInput').value;
+
+      if (!moduleName || !functionName) {
+        log('Please provide module and function names', 'error');
+        return;
+      }
+
+      try {
+        log(`Calling ${moduleName}.${functionName}("${input}")...`);
+        const callBtn = document.getElementById('callBtn');
+        callBtn.disabled = true;
+
+        const result = await manager.call(moduleName, functionName, input);
+        const outputText = textDecoder.decode(result.output);
+
+        log(`✅ Call successful!`, 'success');
+        log(`   Return code: ${result.returnCode}`);
+        log(`   Output: ${outputText}`);
+
+        callBtn.disabled = false;
+      } catch (error) {
+        log(`Call failed: ${error.message}`, 'error');
+        console.error(error);
+        document.getElementById('callBtn').disabled = false;
+      }
+    }
+
+    async function runAllTests() {
+      if (!manager) {
+        log('Please load plugins first!', 'error');
+        return;
+      }
+
+      log('=== Running All Tests ===', 'info');
+      const testBtn = document.getElementById('testBtn');
+      testBtn.disabled = true;
+
+      try {
+        // Test 1: Native host uppercase
+        log('\nTest 1: Native host uppercase');
+        const r1 = await manager.call('native_host', 'uppercase', 'hello world');
+        log(`   Input: "hello world"`);
+        log(`   Output: "${textDecoder.decode(r1.output)}"`, 'success');
+
+        // Test 2: Native host timestamp
+        log('\nTest 2: Native host timestamp');
+        const r2 = await manager.call('native_host', 'timestamp', '');
+        log(`   Timestamp: ${textDecoder.decode(r2.output)}`, 'success');
+
+        // Test 3: Logger plugin
+        log('\nTest 3: Logger plugin (calls host.print)');
+        const r3 = await manager.call('logger', 'log', 'Test message');
+        log(`   Result: "${textDecoder.decode(r3.output)}"`, 'success');
+
+        // Test 4: Greet plugin (calls logger -> host)
+        log('\nTest 4: Greet plugin (calls logger → host)');
+        const r4 = await manager.call('greet', 'greet', 'Browser User');
+        log(`   Greeting: "${textDecoder.decode(r4.output)}"`, 'success');
+
+        // Test 5: Multiple greetings
+        log('\nTest 5: Multiple greetings (showing randomness)');
+        for (let i = 0; i < 3; i++) {
+          const r = await manager.call('greet', 'greet', `User${i + 1}`);
+          log(`   Greeting ${i + 1}: "${textDecoder.decode(r.output)}"`, 'success');
+        }
+
+        log('\n✅ All tests completed!', 'success');
+      } catch (error) {
+        log(`Test failed: ${error.message}`, 'error');
+        console.error(error);
+      }
+
+      testBtn.disabled = false;
+    }
+  </script>
+</body>
+
+</html>
