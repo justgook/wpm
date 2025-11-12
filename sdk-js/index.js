@@ -142,8 +142,17 @@ class PluginManager {
       memory: wasmModule.instance.exports.memory
     });
 
-    // Initialize memory offset for this module
-    this.memoryOffsets.set(module.name, 0);
+    // Pre-allocate a small amount of memory to ensure the memory system is initialized
+    // This prevents issues with the first cross-plugin call
+    try {
+      const initPtr = this.allocFunc(module.name, 64); // Allocate 64 bytes for initialization
+      if (initPtr > 0) {
+        // Successfully initialized memory allocation system
+        console.log(`Memory system initialized for plugin: ${module.name}`);
+      }
+    } catch (e) {
+      console.warn(`Failed to pre-initialize memory for ${module.name}:`, e);
+    }
   }
 
   /**
@@ -281,15 +290,41 @@ class PluginManager {
 
   /**
    * Allocate memory in a module's linear memory
+   * Strategy: Always allocate at the END of current memory and grow if needed
+   * This avoids conflicts with TinyGo's heap which grows upward from data segments
    */
   allocFunc(moduleName, size) {
-    const offset = this.memoryOffsets.get(moduleName) || 0;
-    this.memoryOffsets.set(moduleName, offset + size);
-    return offset;
+    const module = this.wasmModules.get(moduleName);
+    if (!module) return 0;
+
+    // Ensure minimum size for allocation
+    if (size === 0) size = 1;
+
+    // Calculate how many pages we need to add for this allocation
+    // We'll add extra pages to reduce frequency of grows
+    const pagesNeeded = Math.ceil(size / 65536) || 1;
+
+    // Grow memory with proper error handling and initialization
+    try {
+      const oldPages = module.memory.grow(pagesNeeded);
+      const allocPtr = oldPages * 65536;
+
+      // Initialize the allocated memory to zeros to avoid garbage data issues
+      const memory = new Uint8Array(module.memory.buffer);
+      for (let i = allocPtr; i < allocPtr + size; i++) {
+        memory[i] = 0;
+      }
+
+      return allocPtr;
+    } catch (e) {
+      console.error(`Failed to grow memory for ${moduleName}: tried to add ${pagesNeeded} pages (${size} bytes requested)`, e);
+      throw new Error(`Out of memory in ${moduleName}`);
+    }
   }
 
   freeFunc(moduleName, ptr) {
-    // No-op for now (simple bump allocator)
+    // No-op - we can't shrink WASM memory
+    // The memory will be reused after the WASM instance is recreated
   }
 
   inputPtrFunc() {
@@ -452,37 +487,40 @@ class PluginManager {
       throw new Error(`WASM module ${moduleName} not found`);
     }
 
-    const memory = new Uint8Array(module.memory.buffer);
+    try {
+      // Write input to memory
+      const inputPtr = this.allocFunc(moduleName, input.length);
+      const currentMemory = new Uint8Array(module.memory.buffer); // Refresh in case memory grew
+      currentMemory.set(input, inputPtr);
+      this.currentInputPtr = inputPtr;
+      this.currentInputLen = input.length;
 
-    // Write input to memory
-    const inputPtr = this.allocFunc(moduleName, input.length);
-    memory.set(input, inputPtr);
-    this.currentInputPtr = inputPtr;
-    this.currentInputLen = input.length;
+      // Reset output
+      this.currentOutputPtr = 0;
+      this.currentOutputLen = 0;
 
-    // Reset output
-    this.currentOutputPtr = 0;
-    this.currentOutputLen = 0;
+      // Call the function
+      const fn = module.instance.exports[functionName];
+      if (!fn) {
+        throw new Error(`Function ${functionName} not found in module ${moduleName}`);
+      }
 
-    // Call the function
-    const fn = module.instance.exports[functionName];
-    if (!fn) {
-      throw new Error(`Function ${functionName} not found in module ${moduleName}`);
+      const returnValue = fn() || 0;
+
+      // Read output
+      let output = new Uint8Array(0);
+      if (this.currentOutputPtr !== 0 && this.currentOutputLen > 0) {
+        const updatedMemory = new Uint8Array(module.memory.buffer);
+        output = updatedMemory.slice(this.currentOutputPtr, this.currentOutputPtr + this.currentOutputLen);
+      }
+
+      return {
+        returnCode: returnValue,
+        output: output
+      };
+    } finally {
+      // No cleanup needed - memory grows but data in TinyGo's heap is preserved
     }
-
-    const returnValue = fn() || 0;
-
-    // Read output
-    let output = new Uint8Array(0);
-    if (this.currentOutputPtr !== 0 && this.currentOutputLen > 0) {
-      const updatedMemory = new Uint8Array(module.memory.buffer);
-      output = updatedMemory.slice(this.currentOutputPtr, this.currentOutputPtr + this.currentOutputLen);
-    }
-
-    return {
-      returnCode: returnValue,
-      output: output
-    };
   }
 
   /**
