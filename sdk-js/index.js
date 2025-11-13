@@ -181,7 +181,7 @@ class PluginManager {
     importObject.wasi_snapshot_preview1 = {
       // File descriptor operations (no-ops for browser)
       fd_close: () => 0,
-      fd_write: (fd, iovs, iovsLen, nwritten) => {
+      fd_write: (fd, _iovs, _iovsLen, _nwritten) => {
         // Minimal console.log support for stdout/stderr
         if (fd === 1 || fd === 2) {
           // fd 1 = stdout, fd 2 = stderr
@@ -562,6 +562,20 @@ class PluginManager {
     }
 
     return this.callSync(moduleName, functionName, input);
+  }
+
+  rawCall(moduleName, functionName, input) {
+    const module = this.wasmModules.get(moduleName)
+    if (!module) {
+      throw new Error(`WASM module ${moduleName} not found`)
+    }
+
+    const fn = module.instance.exports[functionName]
+    if (!fn) {
+      throw new Error(`Function ${functionName} not found in module ${moduleName}`)
+    }
+
+    return fn(input)
   }
 
   /**
