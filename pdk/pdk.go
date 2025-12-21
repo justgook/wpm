@@ -5,6 +5,10 @@ import (
 	"unsafe"
 )
 
+// Maximum buffer size for PDK operations
+// Increased from 1MB (1 << 20) to 4MB (1 << 22) to support large tilemaps
+const maxPDKBufferSize = 1 << 22 // 4MB
+
 //go:wasmimport env alloc
 func alloc(size uint64) uint32
 
@@ -61,12 +65,12 @@ func InputInfo() (ptr uint32, len uint32) {
 // High-level helpers - handle unsafe pointer conversion internally
 func Input() []byte {
 	ptr, len := InputInfo()
-	return (*[1 << 20]byte)(unsafe.Pointer(uintptr(ptr)))[:len:len]
+	return (*[maxPDKBufferSize]byte)(unsafe.Pointer(uintptr(ptr)))[:len:len]
 }
 
 func Output(data []byte) {
 	outPtr := Alloc(uint64(len(data)))
-	outBuf := (*[1 << 20]byte)(unsafe.Pointer(uintptr(outPtr)))[:len(data):len(data)]
+	outBuf := (*[maxPDKBufferSize]byte)(unsafe.Pointer(uintptr(outPtr)))[:len(data):len(data)]
 	copy(outBuf, data)
 	SetOutput(outPtr, uint32(len(data)))
 }
@@ -141,5 +145,5 @@ func CallHost(functionName string, input []byte) (int32, []byte, error) {
 
 // Helper function to convert pointer to byte slice
 func ptrToBytes(ptr uint32, length uint32) []byte {
-	return (*[1 << 20]byte)(unsafe.Pointer(uintptr(ptr)))[:length:length]
+	return (*[maxPDKBufferSize]byte)(unsafe.Pointer(uintptr(ptr)))[:length:length]
 }
